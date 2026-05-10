@@ -107,7 +107,7 @@ Section Merge also has a crossfade_ms parameter (default 20ms) that smooths the 
 
 ## Installation
 
-### Option 1 — ComfyUI Manager
+### Option 1 — ComfyUI Manager (currently not available in comfyui manager but hopefully will be soon!)
 
 Search Rebels Audio Nodes and install directly.
 
