@@ -2,16 +2,12 @@
 Rebel Audio Nodes - Audio manipulation for ComfyUI LTX workflows
 RealRebelAI
 
-One node does everything:
-    RebelAudioEdit — trim, pitch, tempo, filter, EQ, compress, reverb, chorus, gain, fade
-                     with built-in preview player and pre-LTX memory flush
+Nodes:
+    RebelAudioEdit          — all-in-one audio editor with toggleable effect sections
+    RebelAudioSectionExtract — pull a time region out for isolated editing
+    RebelAudioSectionMerge   — stitch the processed region back in
 
-Section pair (for region-only edits):
-    RebelAudioSectionExtract  — pull a time region out
-    RebelAudioSectionMerge    — stitch it back in with crossfade
-
-Requires:
-    pip install pedalboard librosa soundfile   (auto-installed via __init__.py)
+Requires:  pip install pedalboard librosa soundfile  (auto-installed via __init__.py)
 """
 
 import gc
@@ -31,78 +27,52 @@ def _require_pedalboard():
         import pedalboard
         return pedalboard
     except ImportError:
-        raise ImportError(
-            "[RebelAudio] pedalboard not found. Run:\n"
-            "  python_embeded\\python.exe -m pip install pedalboard"
-        )
+        raise ImportError("[RebelAudio] pip install pedalboard")
 
 def _require_librosa():
     try:
         import librosa
         return librosa
     except ImportError:
-        raise ImportError(
-            "[RebelAudio] librosa not found. Run:\n"
-            "  python_embeded\\python.exe -m pip install librosa"
-        )
+        raise ImportError("[RebelAudio] pip install librosa")
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _to_numpy(audio: dict) -> tuple[np.ndarray, int]:
-    """ComfyUI AUDIO dict -> float32 numpy [channels, samples]"""
-    arr = audio["waveform"][0].cpu().numpy().astype(np.float32)
-    return arr, audio["sample_rate"]
+def _to_numpy(audio):
+    return audio["waveform"][0].cpu().numpy().astype(np.float32), audio["sample_rate"]
 
-
-def _to_audio(arr: np.ndarray, sr: int) -> dict:
-    """float32 numpy [channels, samples] -> ComfyUI AUDIO dict"""
+def _to_audio(arr, sr):
     return {"waveform": torch.from_numpy(arr).unsqueeze(0), "sample_rate": sr}
 
-
-def _apply_pedalboard(arr: np.ndarray, sr: int, plugins: list) -> np.ndarray:
+def _apply_pedalboard(arr, sr, plugins):
     pb = _require_pedalboard()
     board = pb.Pedalboard(plugins)
     return np.stack([board(ch, sr, reset=True) for ch in arr], axis=0)
 
-
 def _flush_memory():
-    """Full memory flush: GC, VRAM, librosa cache, Windows working set trim."""
-    gc.collect(0)
-    gc.collect(1)
-    gc.collect(2)
+    gc.collect(0); gc.collect(1); gc.collect(2)
     try:
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
-    except Exception:
-        pass
+    except Exception: pass
     try:
         import librosa
-        if hasattr(librosa.filters, 'cache'):
-            librosa.filters.cache.clear()
-    except Exception:
-        pass
+        if hasattr(librosa.filters, "cache"): librosa.filters.cache.clear()
+    except Exception: pass
     try:
         ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
-    except Exception:
-        pass
+    except Exception: pass
 
 
 # ---------------------------------------------------------------------------
-# Node: RebelAudioEdit  (the one node)
+# Node: RebelAudioEdit
 # ---------------------------------------------------------------------------
 class RebelAudioEdit:
     """
-    All-in-one audio editor for ComfyUI. Enable only what you need.
-
-    Processing order (fixed internal chain):
-        Trim -> Pitch Shift -> Time Stretch -> Filter -> EQ ->
-        Compressor -> Reverb -> Chorus -> Gain -> Fade
-
-    Built-in:
-        preview  -- renders a playback widget on the node after processing
-        flush    -- wipes RAM/VRAM before handing off to LTX
+    All-in-one audio editor. Enable only what you need.
+    Processing order: Trim > Pitch > Tempo > Filter > EQ > Compressor > Reverb > Chorus > Gain > Fade
     """
 
     CATEGORY     = "RebelAudio"
@@ -125,15 +95,12 @@ class RebelAudioEdit:
 
                 # Pitch Shift
                 "pitch":           ("BOOLEAN", {"default": False}),
-                "pitch_semitones": ("FLOAT",   {"default": 0.0, "min": -24.0, "max": 24.0, "step": 0.5,
-                                                "tooltip": "+12 = octave up, -12 = octave down"}),
+                "pitch_semitones": ("FLOAT",   {"default": 0.0, "min": -24.0, "max": 24.0, "step": 0.5}),
 
                 # Time Stretch
                 "tempo":                ("BOOLEAN", {"default": False}),
-                "tempo_rate":           ("FLOAT",   {"default": 1.0, "min": 0.25, "max": 4.0, "step": 0.05,
-                                                     "tooltip": "1.0 = original. 2.0 = double speed."}),
-                "tempo_preserve_pitch": ("BOOLEAN", {"default": True,
-                                                     "tooltip": "True = phase vocoder (tempo only). False = resample (pitch follows speed)."}),
+                "tempo_rate":           ("FLOAT",   {"default": 1.0, "min": 0.25, "max": 4.0, "step": 0.05}),
+                "tempo_preserve_pitch": ("BOOLEAN", {"default": True}),
 
                 # Filter
                 "filter":           ("BOOLEAN",                          {"default": False}),
@@ -174,20 +141,17 @@ class RebelAudioEdit:
                 "chorus_delay_ms":  ("FLOAT",   {"default": 7.0, "min": 0.0, "max": 50.0, "step": 0.5}),
                 "chorus_mix":       ("FLOAT",   {"default": 0.5, "min": 0.0, "max": 1.0,  "step": 0.05}),
 
-                # Gain / Normalize
+                # Gain
                 "gain_db":   ("FLOAT",   {"default": 0.0, "min": -40.0, "max": 20.0, "step": 0.5}),
-                "normalize": ("BOOLEAN", {"default": False,
-                                          "tooltip": "Normalize to 0dBFS peak before applying gain."}),
+                "normalize": ("BOOLEAN", {"default": False}),
 
                 # Fade
                 "fade_in_sec":  ("FLOAT", {"default": 0.0, "min": 0.0, "max": 30.0, "step": 0.1}),
                 "fade_out_sec": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 30.0, "step": 0.1}),
 
-                # Output options
-                "preview": ("BOOLEAN", {"default": True,
-                                        "tooltip": "Render an in-node playback widget after processing."}),
-                "flush":   ("BOOLEAN", {"default": True,
-                                        "tooltip": "Flush RAM/VRAM after processing. Enable when this is the last audio node before LTX."}),
+                # Output
+                "preview": ("BOOLEAN", {"default": True}),
+                "flush":   ("BOOLEAN", {"default": True}),
             }
         }
 
@@ -205,16 +169,15 @@ class RebelAudioEdit:
         fade_in_sec, fade_out_sec,
         preview, flush,
     ):
-        arr, sr  = _to_numpy(audio)
-        scratch  = []   # intermediates to clean up
+        arr, sr = _to_numpy(audio)
+        scratch = []
 
         # 1. Trim
         if trim:
             total = arr.shape[-1]
             s = int(trim_start_sec * sr)
             e = int(trim_end_sec * sr) if trim_end_sec > 0 else total
-            e = min(e, total)
-            scratch.append(arr); arr = arr[:, s:e].copy()
+            scratch.append(arr); arr = arr[:, s:min(e, total)].copy()
 
         # 2. Pitch Shift
         if pitch and pitch_semitones != 0.0:
@@ -226,54 +189,40 @@ class RebelAudioEdit:
         if tempo and tempo_rate != 1.0:
             if tempo_preserve_pitch:
                 librosa = _require_librosa()
-                stretched = np.stack(
-                    [librosa.effects.time_stretch(ch, rate=tempo_rate) for ch in arr], axis=0
-                )
+                new = np.stack([librosa.effects.time_stretch(ch, rate=tempo_rate) for ch in arr], axis=0)
             else:
                 import scipy.signal as sig
-                new_len   = int(arr.shape[-1] / tempo_rate)
-                stretched = np.stack(
-                    [sig.resample(ch, new_len).astype(np.float32) for ch in arr], axis=0
-                )
-            scratch.append(arr); arr = stretched
+                new = np.stack([sig.resample(ch, int(arr.shape[-1] / tempo_rate)).astype(np.float32) for ch in arr], axis=0)
+            scratch.append(arr); arr = new
 
         # 4. Filter
         if filter:
             import scipy.signal as sig
-            nyq = sr / 2.0
-            c   = min(filter_cutoff_hz / nyq, 0.99)
-            if filter_type == "lowpass":
-                b, a = sig.butter(4, c, btype="low")
-            elif filter_type == "highpass":
-                b, a = sig.butter(4, c, btype="high")
+            nyq = sr / 2.0; c = min(filter_cutoff_hz / nyq, 0.99)
+            if filter_type == "lowpass":    b, a = sig.butter(4, c, btype="low")
+            elif filter_type == "highpass": b, a = sig.butter(4, c, btype="high")
             else:
-                bw   = c / max(filter_q, 0.1)
-                b, a = sig.butter(4, [max(c - bw/2, 0.001), min(c + bw/2, 0.999)], btype="band")
+                bw = c / max(filter_q, 0.1)
+                b, a = sig.butter(4, [max(c-bw/2, 0.001), min(c+bw/2, 0.999)], btype="band")
             scratch.append(arr)
             arr = np.stack([sig.filtfilt(b, a, ch).astype(np.float32) for ch in arr], axis=0)
 
         # 5. EQ
         if eq:
-            pb      = _require_pedalboard()
-            plugins = []
-            if eq_low_db  != 0.0: plugins.append(pb.LowShelfFilter( cutoff_frequency_hz=eq_low_hz,  gain_db=eq_low_db))
-            if eq_mid_db  != 0.0: plugins.append(pb.PeakFilter(     cutoff_frequency_hz=eq_mid_hz,  gain_db=eq_mid_db, q=eq_mid_q))
-            if eq_high_db != 0.0: plugins.append(pb.HighShelfFilter(cutoff_frequency_hz=eq_high_hz, gain_db=eq_high_db))
+            pb = _require_pedalboard(); plugins = []
+            if eq_low_db  != 0: plugins.append(pb.LowShelfFilter(cutoff_frequency_hz=eq_low_hz, gain_db=eq_low_db))
+            if eq_mid_db  != 0: plugins.append(pb.PeakFilter(cutoff_frequency_hz=eq_mid_hz, gain_db=eq_mid_db, q=eq_mid_q))
+            if eq_high_db != 0: plugins.append(pb.HighShelfFilter(cutoff_frequency_hz=eq_high_hz, gain_db=eq_high_db))
             if plugins:
-                scratch.append(arr)
-                arr = _apply_pedalboard(arr, sr, plugins)
+                scratch.append(arr); arr = _apply_pedalboard(arr, sr, plugins)
 
         # 6. Compressor
         if compress:
             pb = _require_pedalboard()
             scratch.append(arr)
             arr = _apply_pedalboard(arr, sr, [
-                pb.Compressor(
-                    threshold_db=compress_threshold,
-                    ratio=compress_ratio,
-                    attack_ms=compress_attack_ms,
-                    release_ms=compress_release_ms,
-                ),
+                pb.Compressor(threshold_db=compress_threshold, ratio=compress_ratio,
+                              attack_ms=compress_attack_ms, release_ms=compress_release_ms),
                 pb.Gain(gain_db=compress_makeup_db),
             ])
 
@@ -282,13 +231,8 @@ class RebelAudioEdit:
             pb = _require_pedalboard()
             scratch.append(arr)
             arr = _apply_pedalboard(arr, sr, [
-                pb.Reverb(
-                    room_size=reverb_room,
-                    damping=reverb_damping,
-                    wet_level=reverb_wet,
-                    dry_level=reverb_dry,
-                    width=reverb_width,
-                )
+                pb.Reverb(room_size=reverb_room, damping=reverb_damping,
+                          wet_level=reverb_wet, dry_level=reverb_dry, width=reverb_width)
             ])
 
         # 8. Chorus
@@ -296,126 +240,83 @@ class RebelAudioEdit:
             pb = _require_pedalboard()
             scratch.append(arr)
             arr = _apply_pedalboard(arr, sr, [
-                pb.Chorus(
-                    rate_hz=chorus_rate_hz,
-                    depth=chorus_depth,
-                    centre_delay_ms=chorus_delay_ms,
-                    mix=chorus_mix,
-                )
+                pb.Chorus(rate_hz=chorus_rate_hz, depth=chorus_depth,
+                          centre_delay_ms=chorus_delay_ms, mix=chorus_mix)
             ])
 
         # 9. Gain / Normalize
         if normalize:
             peak = np.abs(arr).max()
-            if peak > 0:
-                scratch.append(arr); arr = (arr / peak).astype(np.float32)
-
+            if peak > 0: scratch.append(arr); arr = (arr / peak).astype(np.float32)
         if gain_db != 0.0:
-            linear = 10 ** (gain_db / 20.0)
             scratch.append(arr)
-            arr = np.clip(arr * linear, -1.0, 1.0).astype(np.float32)
+            arr = np.clip(arr * (10 ** (gain_db / 20.0)), -1.0, 1.0).astype(np.float32)
 
         # 10. Fade
         if fade_in_sec > 0 or fade_out_sec > 0:
-            n        = arr.shape[-1]
-            envelope = np.ones(n, dtype=np.float32)
-            fi = int(fade_in_sec  * sr)
-            fo = int(fade_out_sec * sr)
-            if fi > 0: envelope[:fi]  *= np.linspace(0.0, 1.0, fi)
-            if fo > 0: envelope[-fo:] *= np.linspace(1.0, 0.0, fo)
-            scratch.append(arr)
-            arr = (arr * envelope).astype(np.float32)
+            n = arr.shape[-1]; env = np.ones(n, dtype=np.float32)
+            fi = int(fade_in_sec * sr); fo = int(fade_out_sec * sr)
+            if fi > 0: env[:fi]  *= np.linspace(0.0, 1.0, fi)
+            if fo > 0: env[-fo:] *= np.linspace(1.0, 0.0, fo)
+            scratch.append(arr); arr = (arr * env).astype(np.float32)
 
-        # Build result
         result_audio = _to_audio(arr, sr)
-
-        # Clean up all intermediate arrays
         for a in scratch:
             try: del a
-            except Exception: pass
-        del scratch, arr
-        gc.collect()
+            except: pass
+        del scratch, arr; gc.collect()
 
         # Preview
         ui_payload = {}
         if preview:
             try:
-                import folder_paths
-                import soundfile as sf
+                import folder_paths, soundfile as sf
                 p_arr, p_sr = _to_numpy(result_audio)
-                filename    = f"rebel_audio_{uuid.uuid4().hex[:8]}.wav"
-                sf.write(os.path.join(folder_paths.get_temp_directory(), filename), p_arr.T, p_sr, subtype="PCM_16")
+                fn = f"rebel_audio_{uuid.uuid4().hex[:8]}.wav"
+                sf.write(os.path.join(folder_paths.get_temp_directory(), fn), p_arr.T, p_sr, subtype="PCM_16")
                 del p_arr
-                ui_payload = {"audio": [{"filename": filename, "subfolder": "", "type": "temp"}]}
+                ui_payload = {"audio": [{"filename": fn, "subfolder": "", "type": "temp"}]}
             except Exception as e:
                 print(f"[RebelAudioEdit] Preview error: {e}")
 
-        # Flush
         if flush:
-            print("[RebelAudioEdit] Flushing memory before LTX...")
             _flush_memory()
-            print("[RebelAudioEdit] Flush complete. Ready for LTX.")
 
-        if ui_payload:
-            return {"ui": ui_payload, "result": (result_audio,)}
-        return (result_audio,)
+        return {"ui": ui_payload, "result": (result_audio,)}
 
 
 # ---------------------------------------------------------------------------
 # Node: Section Extract
 # ---------------------------------------------------------------------------
 class RebelAudioSectionExtract:
-    """
-    Pull a time region out so you can run RebelAudioEdit on just that section,
-    then stitch it back with RebelAudioSectionMerge.
-
-    Wire:
-        Load Audio -> Section Extract -> RebelAudioEdit -> Section Merge -> LTX
-                              |__ original __________________________________|
-    """
-
     CATEGORY     = "RebelAudio/Section"
-    RETURN_TYPES = ("AUDIO", "AUDIO", "FLOAT")
-    RETURN_NAMES = ("section", "original", "start_sec")
+    RETURN_TYPES = ("AUDIO", "AUDIO", "FLOAT", "FLOAT")
+    RETURN_NAMES = ("section", "original", "start_sec", "end_sec")
     FUNCTION     = "process"
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "audio":     ("AUDIO",),
-                "start_sec": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 3600.0, "step": 0.05}),
-                "end_sec":   ("FLOAT", {"default": 2.0, "min": 0.0, "max": 3600.0, "step": 0.05,
-                                         "tooltip": "0 = end of file"}),
-            }
-        }
+        return {"required": {
+            "audio":     ("AUDIO",),
+            "start_sec": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 3600.0, "step": 0.05}),
+            "end_sec":   ("FLOAT", {"default": 2.0, "min": 0.0, "max": 3600.0, "step": 0.05}),
+        }}
 
     def process(self, audio, start_sec, end_sec):
         arr, sr = _to_numpy(audio)
-        total   = arr.shape[-1] / sr
+        total = arr.shape[-1] / sr
         end_sec = total if end_sec <= 0 or end_sec > total else end_sec
-
         if start_sec >= end_sec:
-            raise ValueError("[RebelAudioSectionExtract] start_sec must be less than end_sec")
-
-        s = int(start_sec * sr)
-        e = int(end_sec   * sr)
-        section = arr[:, s:e].copy()
+            raise ValueError("[SectionExtract] start must be < end")
+        section = arr[:, int(start_sec*sr):int(end_sec*sr)].copy()
         del arr
-
-        print(f"[RebelAudioSectionExtract] {start_sec:.3f}s -> {end_sec:.3f}s ({end_sec - start_sec:.3f}s)")
-        return (_to_audio(section, sr), audio, float(start_sec))
+        return (_to_audio(section, sr), audio, float(start_sec), float(end_sec))
 
 
 # ---------------------------------------------------------------------------
 # Node: Section Merge
 # ---------------------------------------------------------------------------
 class RebelAudioSectionMerge:
-    """
-    Stitch a processed section back into the original at the position it
-    was extracted from. Handles duration changes. Crossfade prevents clicks.
-    """
-
     CATEGORY     = "RebelAudio/Section"
     RETURN_TYPES = ("AUDIO",)
     RETURN_NAMES = ("audio",)
@@ -423,73 +324,45 @@ class RebelAudioSectionMerge:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "original":     ("AUDIO",),
-                "section":      ("AUDIO",),
-                "start_sec":    ("FLOAT", {"default": 0.1,  "min": 0.0, "max": 3600.0, "step": 0.05,
-                                            "tooltip": "Wire directly from Section Extract output."}),
-                "crossfade_ms": ("FLOAT", {"default": 20.0, "min": 0.0, "max": 200.0,  "step": 5.0,
-                                            "tooltip": "0 = hard cut. 10-30ms is transparent."}),
-            }
-        }
+        return {"required": {
+            "original":     ("AUDIO",),
+            "section":      ("AUDIO",),
+            "start_sec":    ("FLOAT", {"default": 0.0,  "min": 0.0, "max": 3600.0, "step": 0.05}),
+            "end_sec":      ("FLOAT", {"default": 2.0,  "min": 0.0, "max": 3600.0, "step": 0.05}),
+            "crossfade_ms": ("FLOAT", {"default": 20.0, "min": 0.0, "max": 200.0,  "step": 5.0}),
+        }}
 
-    def process(self, original, section, start_sec, crossfade_ms):
-        import scipy.signal as sig
-
-        orig, sr   = _to_numpy(original)
-        sect, s_sr = _to_numpy(section)
-
-        if s_sr != sr:
-            new_len = int(sect.shape[-1] * sr / s_sr)
-            sect    = np.stack([sig.resample(ch, new_len).astype(np.float32) for ch in sect], axis=0)
-
-        total          = orig.shape[-1]
-        s_start        = min(int(start_sec * sr), total)
-        s_len          = sect.shape[-1]
-        cf             = int((crossfade_ms / 1000.0) * sr)
-        orig_after_s   = min(s_start + s_len, total)
-
-        out = np.concatenate([orig[:, :s_start], sect, orig[:, orig_after_s:]], axis=-1).astype(np.float32)
-
-        # Crossfade at start boundary
-        if cf > 0 and s_start > 0:
-            cf_len = min(cf, s_start, s_len)
-            fo = np.linspace(1.0, 0.0, cf_len, dtype=np.float32)
-            fi = np.linspace(0.0, 1.0, cf_len, dtype=np.float32)
-            out[:, s_start - cf_len : s_start]       *= fo
-            out[:, s_start          : s_start + cf_len] *= fi
-            out[:, s_start - cf_len : s_start]       += orig[:, s_start - cf_len : s_start] * fi
-
-        # Crossfade at end boundary
-        s_end = s_start + s_len
-        if cf > 0 and orig_after_s < total:
-            cf_len = min(cf, s_len, total - orig_after_s)
-            if s_end + cf_len <= out.shape[-1]:
-                fo = np.linspace(1.0, 0.0, cf_len, dtype=np.float32)
-                fi = np.linspace(0.0, 1.0, cf_len, dtype=np.float32)
-                out[:, s_end - cf_len : s_end]       *= fo
-                out[:, s_end          : s_end + cf_len] *= fi
-                out[:, s_end - cf_len : s_end]       += orig[:, orig_after_s - cf_len : orig_after_s] * fi
-
-        out    = np.clip(out, -1.0, 1.0).astype(np.float32)
-        result = _to_audio(out, sr)
-        del orig, sect, out
-        gc.collect()
-
-        print(f"[RebelAudioSectionMerge] Merged at {start_sec:.3f}s, total output {result['waveform'].shape[-1] / sr:.3f}s")
+    def process(self, original, section, start_sec, end_sec, crossfade_ms):
+        orig, sr = _to_numpy(original)
+        sect, _  = _to_numpy(section)
+        total    = orig.shape[-1]
+        s        = min(int(start_sec * sr), total)
+        e        = min(int(end_sec * sr), total)
+        out = np.concatenate([orig[:, :s], sect, orig[:, e:]], axis=-1).astype(np.float32)
+        cf = int((crossfade_ms / 1000.0) * sr)
+        if cf > 0 and s > 0:
+            cl = min(cf, s, sect.shape[-1])
+            fo = np.linspace(1,0,cl,dtype=np.float32); fi = np.linspace(0,1,cl,dtype=np.float32)
+            out[:, s-cl:s] *= fo; out[:, s:s+cl] *= fi
+            out[:, s-cl:s] += orig[:, s-cl:s] * fi
+        se = s + sect.shape[-1]
+        if cf > 0 and e < total:
+            cl = min(cf, sect.shape[-1], total-e)
+            if se+cl <= out.shape[-1]:
+                fo = np.linspace(1,0,cl,dtype=np.float32); fi = np.linspace(0,1,cl,dtype=np.float32)
+                out[:, se-cl:se] *= fo; out[:, se:se+cl] *= fi
+                out[:, se-cl:se] += orig[:, e-cl:e] * fi
+        result = _to_audio(np.clip(out,-1,1).astype(np.float32), sr)
+        del orig, sect, out; gc.collect()
         return (result,)
 
 
-# ---------------------------------------------------------------------------
-# NODE MAPPINGS
 # ---------------------------------------------------------------------------
 NODE_CLASS_MAPPINGS = {
     "RebelAudioEdit":           RebelAudioEdit,
     "RebelAudioSectionExtract": RebelAudioSectionExtract,
     "RebelAudioSectionMerge":   RebelAudioSectionMerge,
 }
-
 NODE_DISPLAY_NAME_MAPPINGS = {
     "RebelAudioEdit":           "🎛️ Rebel Audio Edit",
     "RebelAudioSectionExtract": "✂️ Rebel Audio - Section Extract",
